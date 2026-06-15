@@ -18,7 +18,7 @@ warnings.filterwarnings("ignore")
 # PAGE CONFIG
 # ═══════════════════════════════════════════════
 st.set_page_config(
-    page_title="Kisan Price Crop Price Predication",
+    page_title="Kisan Price Oracle",
     page_icon="🌾",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -309,7 +309,16 @@ hr { border-color: #E2D5C3; }
 @st.cache_data(show_spinner=False)
 def load_data():
     df = pd.read_csv("agriculture.csv")
-    return df.dropna().drop_duplicates()
+    df = df.dropna().drop_duplicates()
+    # Remove outliers using IQR method on price columns
+    price_cols = ["Modal Price", "Min Price", "Max Price"]
+    for col in price_cols:
+        if col in df.columns:
+            Q1 = df[col].quantile(0.25)
+            Q3 = df[col].quantile(0.75)
+            IQR = Q3 - Q1
+            df = df[(df[col] >= Q1 - 1.5 * IQR) & (df[col] <= Q3 + 1.5 * IQR)]
+    return df
 
 @st.cache_resource(show_spinner="Training models — this only happens once…")
 def train_all(n_rows):
