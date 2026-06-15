@@ -18,7 +18,7 @@ warnings.filterwarnings("ignore")
 # PAGE CONFIG
 # ═══════════════════════════════════════════════
 st.set_page_config(
-    page_title="Kisan Price Oracle",
+    page_title="Kisan Price Crop Price Predication",
     page_icon="🌾",
     layout="wide",
     initial_sidebar_state="expanded",
