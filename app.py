@@ -9,10 +9,26 @@ from sklearn.preprocessing import OneHotEncoder, MinMaxScaler
 from sklearn.pipeline import Pipeline
 from sklearn.linear_model import Ridge
 from sklearn.ensemble import RandomForestRegressor
-from xgboost import XGBRegressor
 from sklearn.metrics import mean_absolute_error, r2_score
+import sklearn
 import warnings
 warnings.filterwarnings("ignore")
+
+try:
+    from xgboost import XGBRegressor
+    HAS_XGB = True
+except ImportError:
+    HAS_XGB = False
+
+# Compatibility: sparse_output was added in sklearn 1.2; use sparse for older versions
+import sklearn
+_SKLEARN_GTE_12 = tuple(int(x) for x in sklearn.__version__.split(".")[:2]) >= (1, 2)
+
+def _ohe():
+    if _SKLEARN_GTE_12:
+        return OneHotEncoder(handle_unknown="ignore", sparse_output=False)
+    else:
+        return OneHotEncoder(handle_unknown="ignore", sparse=False)
 
 # ═══════════════════════════════════════════════
 # PAGE CONFIG
@@ -383,7 +399,7 @@ def train_all(n_rows):
     num_cols = X.select_dtypes(exclude=["object"]).columns.tolist()
 
     pre = ColumnTransformer([
-        ("cat", OneHotEncoder(handle_unknown="ignore", sparse_output=False), cat_cols),
+        ("cat", _ohe(), cat_cols),
         ("num", MinMaxScaler(), num_cols),
     ])
 
@@ -392,9 +408,10 @@ def train_all(n_rows):
     specs = {
         "Linear Regression": Ridge(),
         "Random Forest":     RandomForestRegressor(n_estimators=100, random_state=42, n_jobs=-1),
-        "XGBoost":           XGBRegressor(n_estimators=200, learning_rate=0.05, max_depth=6,
-                                          random_state=42, verbosity=0),
     }
+    if HAS_XGB:
+        specs["XGBoost"] = XGBRegressor(n_estimators=200, learning_rate=0.05, max_depth=6,
+                                        random_state=42, verbosity=0)
     trained, metrics, preds = {}, {}, {}
     for name, reg in specs.items():
         pipe = Pipeline([("pre", pre), ("model", reg)])
@@ -1048,7 +1065,7 @@ with tab4:
     if tune_btn and not empty_params:
         # Build preprocessor
         pre = ColumnTransformer([
-            ("cat", OneHotEncoder(handle_unknown="ignore", sparse_output=False), cat_cols),
+            ("cat", _ohe(), cat_cols),
             ("num", MinMaxScaler(), num_cols),
         ])
 
@@ -1056,8 +1073,9 @@ with tab4:
         base_estimators = {
             "Linear Regression": Ridge(),
             "Random Forest":     RandomForestRegressor(random_state=42, n_jobs=-1),
-            "XGBoost":           XGBRegressor(random_state=42, verbosity=0),
         }
+        if HAS_XGB:
+            base_estimators["XGBoost"] = XGBRegressor(random_state=42, verbosity=0)
         pipe = Pipeline([("pre", pre), ("model", base_estimators[tune_model])])
 
         # Subsample training data
