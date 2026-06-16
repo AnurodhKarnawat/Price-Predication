@@ -3,11 +3,11 @@ import pandas as pd
 import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, GridSearchCV, RandomizedSearchCV
 from sklearn.compose import ColumnTransformer
 from sklearn.preprocessing import OneHotEncoder, MinMaxScaler
 from sklearn.pipeline import Pipeline
-from sklearn.linear_model import LinearRegression
+from sklearn.linear_model import Ridge
 from sklearn.ensemble import RandomForestRegressor
 from xgboost import XGBRegressor
 from sklearn.metrics import mean_absolute_error, r2_score
@@ -205,27 +205,6 @@ html, body, [class*="css"] {
   margin-bottom: 20px;
 }
 
-/* ── Model badge ── */
-.model-badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  background: var(--mist);
-  border: 1px solid var(--sage);
-  border-radius: 8px;
-  padding: 6px 12px;
-  font-size: 0.82rem;
-  color: var(--leaf);
-  font-weight: 600;
-  margin: 4px 2px;
-  cursor: pointer;
-}
-.model-badge.active {
-  background: var(--leaf);
-  color: white;
-  border-color: var(--leaf);
-}
-
 /* ── Tab styling ── */
 [data-baseweb="tab-list"] {
   background: transparent;
@@ -251,6 +230,76 @@ html, body, [class*="css"] {
   padding: 20px;
   box-shadow: 0 2px 12px rgba(44,26,14,0.06);
   margin-bottom: 16px;
+}
+
+/* ── Hyperparameter tuning cards ── */
+.param-card {
+  background: white;
+  border-radius: 14px;
+  padding: 20px 24px;
+  border-left: 4px solid var(--harvest);
+  box-shadow: 0 2px 12px rgba(44,26,14,0.08);
+  margin-bottom: 16px;
+}
+.param-label {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--slate);
+  margin-bottom: 8px;
+  font-weight: 600;
+}
+.param-value {
+  font-family: 'Playfair Display', serif;
+  font-size: 1.1rem;
+  font-weight: 700;
+  color: var(--soil);
+}
+.best-params-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 12px;
+  margin: 16px 0;
+}
+.best-param-item {
+  background: var(--mist);
+  border: 1px solid var(--sage);
+  border-radius: 10px;
+  padding: 12px 16px;
+}
+.best-param-name {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--slate);
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+.best-param-val {
+  font-size: 1.05rem;
+  font-weight: 700;
+  color: var(--leaf);
+  font-family: 'Playfair Display', serif;
+}
+.improvement-card {
+  background: linear-gradient(135deg, #1B4D22 0%, #3A7D44 100%);
+  border-radius: 14px;
+  padding: 20px 24px;
+  text-align: center;
+  color: white;
+}
+.improvement-val {
+  font-family: 'Playfair Display', serif;
+  font-size: 2rem;
+  font-weight: 900;
+  color: #A8D5B5;
+}
+.improvement-label {
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: #A8D5B5;
+  margin-top: 4px;
 }
 
 /* ── Streamlit overrides ── */
@@ -299,6 +348,11 @@ hr { border-color: #E2D5C3; }
 [data-testid="stNumberInput"] input {
   border-radius: 10px !important;
 }
+
+/* slider */
+[data-testid="stSlider"] > div > div > div {
+  background: var(--harvest) !important;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -310,7 +364,6 @@ hr { border-color: #E2D5C3; }
 def load_data():
     df = pd.read_csv("agriculture.csv")
     df = df.dropna().drop_duplicates()
-    # Remove outliers using IQR method on price columns
     price_cols = ["Modal Price", "Min Price", "Max Price"]
     for col in price_cols:
         if col in df.columns:
@@ -319,6 +372,7 @@ def load_data():
             IQR = Q3 - Q1
             df = df[(df[col] >= Q1 - 1.5 * IQR) & (df[col] <= Q3 + 1.5 * IQR)]
     return df
+
 
 @st.cache_resource(show_spinner="Training models — this only happens once…")
 def train_all(n_rows):
@@ -336,7 +390,7 @@ def train_all(n_rows):
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
     specs = {
-        "Linear Regression": LinearRegression(),
+        "Linear Regression": Ridge(),
         "Random Forest":     RandomForestRegressor(n_estimators=100, random_state=42, n_jobs=-1),
         "XGBoost":           XGBRegressor(n_estimators=200, learning_rate=0.05, max_depth=6,
                                           random_state=42, verbosity=0),
@@ -350,11 +404,20 @@ def train_all(n_rows):
         preds[name]   = pred
         metrics[name] = {"MAE": mean_absolute_error(y_test, pred),
                          "R2":  r2_score(y_test, pred)}
-    return trained, metrics, preds, np.array(y_test), X_test
+    return trained, metrics, preds, np.array(y_test), X_test, X_train, np.array(y_train), cat_cols, num_cols
+
 
 df = load_data()
 with st.spinner("Loading models…"):
-    models, metrics, test_preds, y_test_arr, X_test = train_all(len(df))
+    models, metrics, test_preds, y_test_arr, X_test, X_train, y_train_arr, cat_cols, num_cols = train_all(len(df))
+
+# Store tuned models in session state
+if "tuned_models" not in st.session_state:
+    st.session_state.tuned_models = {}
+if "tuned_metrics" not in st.session_state:
+    st.session_state.tuned_metrics = {}
+if "best_params" not in st.session_state:
+    st.session_state.best_params = {}
 
 
 # ═══════════════════════════════════════════════
@@ -376,12 +439,22 @@ with st.sidebar:
                 "color:#C9A96E;font-weight:600;margin-bottom:8px'>Choose Model</div>",
                 unsafe_allow_html=True)
 
-    model_choice = st.radio(
+    all_model_names = list(models.keys())
+    tuned_labels = {
+        name: f"{name} ✨ (Tuned)" if name in st.session_state.tuned_models else name
+        for name in all_model_names
+    }
+    model_choice_raw = st.radio(
         "",
-        list(models.keys()),
+        all_model_names,
         index=1,
         label_visibility="collapsed",
+        format_func=lambda x: tuned_labels[x],
     )
+    # Use tuned version if available
+    model_choice = model_choice_raw
+    active_models = {**models, **st.session_state.tuned_models}
+    active_metrics = {**metrics, **st.session_state.tuned_metrics}
 
     st.markdown("<hr style='border-color:rgba(212,124,15,.3);margin:20px 0'>", unsafe_allow_html=True)
     st.markdown("<div style='font-size:.75rem;letter-spacing:.1em;text-transform:uppercase;"
@@ -389,14 +462,16 @@ with st.sidebar:
                 unsafe_allow_html=True)
 
     icons = {"Linear Regression": "📐", "Random Forest": "🌳", "XGBoost": "⚡"}
-    for name, m in metrics.items():
-        is_best = name == "Random Forest"
+    best_model = max(active_metrics, key=lambda k: active_metrics[k]["R2"])
+    for name, m in active_metrics.items():
+        is_best = name == best_model
+        is_tuned = name in st.session_state.tuned_models
         st.markdown(f"""
         <div style='background:rgba(255,255,255,{0.12 if is_best else 0.06});
                     border:1px solid rgba(212,124,15,{0.6 if is_best else 0.2});
                     border-radius:10px;padding:10px 14px;margin-bottom:8px'>
           <div style='font-size:.82rem;font-weight:700;color:#F2C46D'>
-            {icons[name]} {name} {'✅' if is_best else ''}
+            {icons.get(name, "🔧")} {name} {'✅' if is_best else ''}{' ✨' if is_tuned else ''}
           </div>
           <div style='font-size:.75rem;color:#C9A96E;margin-top:4px'>
             MAE ₹{m['MAE']:,.0f} &nbsp;·&nbsp; R² {m['R2']:.4f}
@@ -431,7 +506,12 @@ st.markdown("""
 # ═══════════════════════════════════════════════
 # TABS
 # ═══════════════════════════════════════════════
-tab1, tab2, tab3 = st.tabs(["🔮  Predict Price", "📊  Market Insights", "📈  Model Performance"])
+tab1, tab2, tab3, tab4 = st.tabs([
+    "🔮  Predict Price",
+    "📊  Market Insights",
+    "📈  Model Performance",
+    "⚙️  Hyperparameter Tuning",
+])
 
 
 # ════════════════════════════════════════════════
@@ -444,7 +524,7 @@ with tab1:
                   font-weight:700;color:#2C1A0E'>Predict Modal Price</div>
       <div style='background:#E8F4EA;border:1px solid #6B9E6F;border-radius:8px;
                   padding:3px 12px;font-size:.8rem;color:#3A7D44;font-weight:600'>
-        using {model_choice}
+        using {model_choice}{' ✨ Tuned' if model_choice in st.session_state.tuned_models else ''}
       </div>
     </div>
     """, unsafe_allow_html=True)
@@ -488,10 +568,10 @@ with tab1:
                 "Arrival_Date": arrival,
                 "Min Price": float(min_price), "Max Price": float(max_price),
             }])
-            pred = models[model_choice].predict(inp)[0]
+            selected_pipe = active_models.get(model_choice, models[model_choice])
+            pred = selected_pipe.predict(inp)[0]
             hist = df[df["Commodity"] == commodity]["Modal Price"]
 
-            # Big result card
             st.markdown(f"""
             <div class="predict-result">
               <div class="predict-label">Predicted Modal Price · {model_choice}</div>
@@ -500,18 +580,15 @@ with tab1:
             </div>
             """, unsafe_allow_html=True)
 
-            # Context metrics
             m1, m2, m3, m4 = st.columns(4)
             delta_pct = ((pred - hist.mean()) / hist.mean() * 100)
             m1.metric("Your Prediction",  f"₹{pred:,.0f}")
-            m2.metric("Market Average",   f"₹{hist.mean():,.0f}",
-                      f"{delta_pct:+.1f}% vs avg")
+            m2.metric("Market Average",   f"₹{hist.mean():,.0f}", f"{delta_pct:+.1f}% vs avg")
             m3.metric("Historical Low",   f"₹{hist.min():,.0f}")
             m4.metric("Historical High",  f"₹{hist.max():,.0f}")
 
             st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
 
-            # Gauge + price band chart
             gc, bc = st.columns([1, 1], gap="large")
             with gc:
                 fig_g = go.Figure(go.Indicator(
@@ -543,7 +620,6 @@ with tab1:
                 st.plotly_chart(fig_g, use_container_width=True)
 
             with bc:
-                # Violin / box of this commodity
                 fig_v = go.Figure()
                 fig_v.add_trace(go.Violin(
                     y=hist, name=commodity,
@@ -563,7 +639,6 @@ with tab1:
                 )
                 st.plotly_chart(fig_v, use_container_width=True)
 
-            # Similar listings
             similar = df[
                 (df["Commodity"] == commodity) & (df["State"] == state)
             ][["Market", "Variety", "Grade", "Min Price", "Max Price", "Modal Price"]].head(6)
@@ -584,7 +659,6 @@ with tab2:
                 "font-weight:700;color:#2C1A0E;margin-bottom:24px'>Market Insights</div>",
                 unsafe_allow_html=True)
 
-    # KPI row
     k1, k2, k3, k4 = st.columns(4)
     k1.metric("Total Records",    f"{len(df):,}")
     k2.metric("States",           df["State"].nunique())
@@ -593,7 +667,6 @@ with tab2:
 
     st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
 
-    # Row 1: Top commodities + state map
     r1a, r1b = st.columns([1.2, 1], gap="large")
     with r1a:
         top15 = (df.groupby("Commodity")["Modal Price"]
@@ -625,7 +698,6 @@ with tab2:
                            coloraxis_showscale=False)
         st.plotly_chart(fig2, use_container_width=True)
 
-    # Row 2: distribution + grade box
     r2a, r2b = st.columns(2, gap="large")
     with r2a:
         fig3 = px.histogram(df, x="Modal Price", nbins=70,
@@ -651,7 +723,6 @@ with tab2:
                                       gridcolor="#EEE6D8"))
         st.plotly_chart(fig4, use_container_width=True)
 
-    # Row 3: treemap + scatter
     r3a, r3b = st.columns([1.2, 1], gap="large")
     with r3a:
         top_comm = df["Commodity"].value_counts().head(20).reset_index()
@@ -687,32 +758,32 @@ with tab3:
                 "font-weight:700;color:#2C1A0E;margin-bottom:24px'>Model Performance</div>",
                 unsafe_allow_html=True)
 
-    # Comparison table
     comp_rows = []
-    for name, m in metrics.items():
+    for name, m in active_metrics.items():
+        is_tuned = name in st.session_state.tuned_models
         comp_rows.append({
-            "Model": name,
+            "Model": f"{name}{' ✨' if is_tuned else ''}",
             "MAE (₹)": f"₹{m['MAE']:,.2f}",
             "R² Score": f"{m['R2']:.4f}",
             "Accuracy": f"{m['R2']*100:.2f}%",
-            "🏆": "Best" if name == "Random Forest" else ""
+            "Status": "Tuned ✨" if is_tuned else "Default",
         })
     st.dataframe(pd.DataFrame(comp_rows), use_container_width=True, hide_index=True)
 
     st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
 
-    # MAE + R2 comparison bars
     p1, p2 = st.columns(2, gap="large")
     model_colors = {"Linear Regression": "#1565C0", "Random Forest": "#3A7D44", "XGBoost": "#E65100"}
 
     with p1:
         fig_mae = go.Figure()
-        for name, m in metrics.items():
+        for name, m in active_metrics.items():
+            color = model_colors.get(name, "#888")
             fig_mae.add_trace(go.Bar(
                 name=name, x=[name], y=[m["MAE"]],
-                marker_color=model_colors[name],
+                marker_color=color,
                 text=[f"₹{m['MAE']:,.0f}"], textposition="outside",
-                textfont=dict(size=12, color=model_colors[name])
+                textfont=dict(size=12, color=color)
             ))
         fig_mae.update_layout(
             title=dict(text="MAE — lower is better", font=dict(size=13, color="#4A5568")),
@@ -726,12 +797,13 @@ with tab3:
 
     with p2:
         fig_r2 = go.Figure()
-        for name, m in metrics.items():
+        for name, m in active_metrics.items():
+            color = model_colors.get(name, "#888")
             fig_r2.add_trace(go.Bar(
                 name=name, x=[name], y=[m["R2"]],
-                marker_color=model_colors[name],
+                marker_color=color,
                 text=[f"{m['R2']:.4f}"], textposition="outside",
-                textfont=dict(size=12, color=model_colors[name])
+                textfont=dict(size=12, color=color)
             ))
         fig_r2.update_layout(
             title=dict(text="R² Score — higher is better", font=dict(size=13, color="#4A5568")),
@@ -743,7 +815,6 @@ with tab3:
         )
         st.plotly_chart(fig_r2, use_container_width=True)
 
-    # Per-model deep dive
     st.markdown("<hr>", unsafe_allow_html=True)
     selected_eval = st.selectbox("Deep-dive into model", list(models.keys()))
     pred_ev = test_preds[selected_eval]
@@ -782,6 +853,391 @@ with tab3:
                               title_font=dict(size=13, color="#4A5568"),
                               xaxis=dict(gridcolor="#EEE6D8"), yaxis=dict(gridcolor="#EEE6D8"))
         st.plotly_chart(fig_res, use_container_width=True)
+
+
+# ════════════════════════════════════════════════
+# TAB 4 — HYPERPARAMETER TUNING
+# ════════════════════════════════════════════════
+with tab4:
+    st.markdown("""
+    <div style='font-family:Playfair Display,serif;font-size:1.6rem;
+                font-weight:700;color:#2C1A0E;margin-bottom:8px'>Hyperparameter Tuning</div>
+    <p style='color:#4A5568;margin-bottom:24px;font-size:.95rem'>
+      Configure and run grid search or randomized search to find the best hyperparameters
+      for each model. Tuned models replace the defaults in prediction.
+    </p>
+    """, unsafe_allow_html=True)
+
+    # Model selector
+    tune_model = st.selectbox(
+        "Select model to tune",
+        list(models.keys()),
+        key="tune_model_select"
+    )
+
+    st.markdown("<hr>", unsafe_allow_html=True)
+
+    # ── Per-model param config ──
+    def build_param_grid(model_name):
+        """Returns (search_type_options, param_grid_dict) for the chosen model."""
+        if model_name == "Linear Regression":
+            return {
+                "Ridge α (regularization)": {
+                    "key": "model__alpha",
+                    "options": [0.01, 0.1, 1.0, 10.0, 100.0, 500.0],
+                    "default": [0.01, 0.1, 1.0, 10.0, 100.0],
+                    "type": "multiselect",
+                    "help": "Smaller α = less regularization (like plain OLS). Larger α = stronger shrinkage.",
+                },
+            }
+        elif model_name == "Random Forest":
+            return {
+                "n_estimators (trees)": {
+                    "key": "model__n_estimators",
+                    "options": [50, 100, 200, 300, 500],
+                    "default": [100, 200, 300],
+                    "type": "multiselect",
+                    "help": "More trees → better accuracy but slower training.",
+                },
+                "max_depth": {
+                    "key": "model__max_depth",
+                    "options": [None, 10, 20, 30, 40],
+                    "default": [None, 20, 30],
+                    "type": "multiselect",
+                    "help": "Max depth of each tree. None = unlimited.",
+                },
+                "min_samples_split": {
+                    "key": "model__min_samples_split",
+                    "options": [2, 5, 10, 20],
+                    "default": [2, 5, 10],
+                    "type": "multiselect",
+                    "help": "Minimum samples required to split a node.",
+                },
+                "max_features": {
+                    "key": "model__max_features",
+                    "options": ["sqrt", "log2", 0.5, 0.8],
+                    "default": ["sqrt", "log2"],
+                    "type": "multiselect",
+                    "help": "Number of features to consider at each split.",
+                },
+            }
+        else:  # XGBoost
+            return {
+                "n_estimators": {
+                    "key": "model__n_estimators",
+                    "options": [100, 200, 300, 500],
+                    "default": [100, 200, 300],
+                    "type": "multiselect",
+                    "help": "Number of boosting rounds.",
+                },
+                "learning_rate": {
+                    "key": "model__learning_rate",
+                    "options": [0.01, 0.05, 0.1, 0.2, 0.3],
+                    "default": [0.05, 0.1, 0.2],
+                    "type": "multiselect",
+                    "help": "Step size shrinkage to prevent overfitting.",
+                },
+                "max_depth": {
+                    "key": "model__max_depth",
+                    "options": [3, 4, 5, 6, 8, 10],
+                    "default": [4, 6, 8],
+                    "type": "multiselect",
+                    "help": "Maximum depth of a tree.",
+                },
+                "subsample": {
+                    "key": "model__subsample",
+                    "options": [0.6, 0.7, 0.8, 0.9, 1.0],
+                    "default": [0.7, 0.8, 0.9],
+                    "type": "multiselect",
+                    "help": "Fraction of samples used per tree.",
+                },
+                "colsample_bytree": {
+                    "key": "model__colsample_bytree",
+                    "options": [0.5, 0.6, 0.7, 0.8, 1.0],
+                    "default": [0.6, 0.8, 1.0],
+                    "type": "multiselect",
+                    "help": "Fraction of features used per tree.",
+                },
+            }
+
+    param_meta = build_param_grid(tune_model)
+
+    # ── Search settings ──
+    cfg_col, param_col = st.columns([1, 2], gap="large")
+
+    with cfg_col:
+        st.markdown("""
+        <div class='section-eyebrow'>Search Strategy</div>
+        <div class='section-title' style='font-size:1.1rem'>Configuration</div>
+        """, unsafe_allow_html=True)
+
+        search_type = st.radio(
+            "Search method",
+            ["Grid Search (exhaustive)", "Randomized Search (fast)"],
+            help="Grid Search tries every combination. Randomized Search samples random subsets — much faster for large grids.",
+        )
+
+        cv_folds = st.slider("Cross-validation folds", min_value=2, max_value=10, value=3,
+                             help="More folds = more robust estimate but slower.")
+
+        if "Randomized" in search_type:
+            n_iter = st.slider("Number of random combinations", min_value=5, max_value=50, value=15,
+                               help="How many random param combos to evaluate.")
+        else:
+            n_iter = None
+
+        sample_pct = st.slider(
+            "Training data sample %",
+            min_value=10, max_value=100, value=30, step=5,
+            help="Use a subset of training data for faster tuning. 30% is a good balance of speed vs accuracy.",
+        )
+
+        scoring_metric = st.selectbox(
+            "Optimise for",
+            ["neg_mean_absolute_error", "r2", "neg_root_mean_squared_error"],
+            help="Metric used to rank parameter combinations.",
+        )
+
+    with param_col:
+        st.markdown(f"""
+        <div class='section-eyebrow'>Parameters</div>
+        <div class='section-title' style='font-size:1.1rem'>{tune_model} · Search Grid</div>
+        """, unsafe_allow_html=True)
+
+        user_grid = {}
+        for label, meta in param_meta.items():
+            opts = meta["options"]
+            default = meta["default"]
+            sel = st.multiselect(
+                f"**{label}**",
+                options=[str(o) for o in opts],
+                default=[str(o) for o in default],
+                help=meta["help"],
+                key=f"param_{label}",
+            )
+            # Convert back to original types
+            type_map = {str(o): o for o in opts}
+            user_grid[meta["key"]] = [type_map[s] for s in sel if s in type_map]
+
+        # Warn if any param list is empty
+        empty_params = [k for k, v in user_grid.items() if len(v) == 0]
+        if empty_params:
+            st.warning(f"⚠️ Please select at least one value for: {', '.join(empty_params)}")
+
+        total_combos = 1
+        for v in user_grid.values():
+            total_combos *= len(v)
+        effective = total_combos if "Grid" in search_type else min(n_iter or 15, total_combos)
+        st.markdown(f"""
+        <div style='background:#E8F4EA;border:1px solid #6B9E6F;border-radius:10px;
+                    padding:12px 16px;margin-top:8px;font-size:.85rem;color:#2A5C32'>
+          <strong>📐 Grid size:</strong> {total_combos:,} combinations &nbsp;·&nbsp;
+          <strong>⚡ Will evaluate:</strong> {effective:,} with {cv_folds}-fold CV
+          &nbsp;→&nbsp; <strong>{effective * cv_folds:,} fits</strong>
+        </div>
+        """, unsafe_allow_html=True)
+
+    st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
+
+    tune_btn = st.button(
+        f"⚙️  Run {('Randomized' if 'Randomized' in search_type else 'Grid')} Search · {tune_model}",
+        use_container_width=True,
+        disabled=bool(empty_params),
+    )
+
+    if tune_btn and not empty_params:
+        # Build preprocessor
+        pre = ColumnTransformer([
+            ("cat", OneHotEncoder(handle_unknown="ignore", sparse_output=False), cat_cols),
+            ("num", MinMaxScaler(), num_cols),
+        ])
+
+        # Base estimator
+        base_estimators = {
+            "Linear Regression": Ridge(),
+            "Random Forest":     RandomForestRegressor(random_state=42, n_jobs=-1),
+            "XGBoost":           XGBRegressor(random_state=42, verbosity=0),
+        }
+        pipe = Pipeline([("pre", pre), ("model", base_estimators[tune_model])])
+
+        # Subsample training data
+        n_sample = max(100, int(len(X_train) * sample_pct / 100))
+        rng = np.random.default_rng(42)
+        idx = rng.choice(len(X_train), size=n_sample, replace=False)
+        X_tr_sub = X_train.iloc[idx]
+        y_tr_sub = y_train_arr[idx]
+
+        progress_bar = st.progress(0, text="⚙️ Initialising search…")
+
+        try:
+            progress_bar.progress(10, text="🔄 Running cross-validation — this may take a minute…")
+
+            if "Grid" in search_type:
+                searcher = GridSearchCV(
+                    pipe, user_grid,
+                    cv=cv_folds, scoring=scoring_metric,
+                    n_jobs=-1, refit=True, verbose=0,
+                )
+            else:
+                searcher = RandomizedSearchCV(
+                    pipe, user_grid,
+                    n_iter=n_iter, cv=cv_folds, scoring=scoring_metric,
+                    n_jobs=-1, refit=True, verbose=0, random_state=42,
+                )
+
+            searcher.fit(X_tr_sub, y_tr_sub)
+            progress_bar.progress(75, text="📊 Evaluating on test set…")
+
+            # Evaluate best model on full test set
+            best_pipe = searcher.best_estimator_
+            tuned_pred = best_pipe.predict(X_test)
+            tuned_mae = mean_absolute_error(y_test_arr, tuned_pred)
+            tuned_r2  = r2_score(y_test_arr, tuned_pred)
+
+            # Store in session state
+            st.session_state.tuned_models[tune_model]  = best_pipe
+            st.session_state.tuned_metrics[tune_model] = {"MAE": tuned_mae, "R2": tuned_r2}
+            st.session_state.best_params[tune_model]   = searcher.best_params_
+
+            progress_bar.progress(100, text="✅ Tuning complete!")
+
+            # ── Results display ──
+            st.markdown("""
+            <div style='font-family:Playfair Display,serif;font-size:1.2rem;
+                        font-weight:700;color:#2C1A0E;margin:24px 0 16px'>
+              ✨ Tuning Results
+            </div>
+            """, unsafe_allow_html=True)
+
+            orig_mae = metrics[tune_model]["MAE"]
+            orig_r2  = metrics[tune_model]["R2"]
+            mae_delta = orig_mae - tuned_mae
+            r2_delta  = tuned_r2 - orig_r2
+
+            # Improvement cards
+            ic1, ic2, ic3, ic4 = st.columns(4)
+            with ic1:
+                st.metric("MAE Before", f"₹{orig_mae:,.0f}")
+            with ic2:
+                st.metric("MAE After (Tuned)", f"₹{tuned_mae:,.0f}",
+                          f"{'-' if mae_delta >= 0 else '+'}{abs(mae_delta):,.0f} ₹",
+                          delta_color="normal" if mae_delta >= 0 else "inverse")
+            with ic3:
+                st.metric("R² Before", f"{orig_r2:.4f}")
+            with ic4:
+                st.metric("R² After (Tuned)", f"{tuned_r2:.4f}",
+                          f"{'+' if r2_delta >= 0 else ''}{r2_delta:.4f}",
+                          delta_color="normal")
+
+            # Best params
+            st.markdown("""
+            <div style='font-size:.85rem;font-weight:700;color:#4A5568;margin:16px 0 8px'>
+              🎯 Best Parameters Found
+            </div>
+            """, unsafe_allow_html=True)
+
+            clean_params = {k.replace("model__", ""): v
+                            for k, v in searcher.best_params_.items()}
+            param_items = "".join([
+                f"""<div class='best-param-item'>
+                      <div class='best-param-name'>{k}</div>
+                      <div class='best-param-val'>{v}</div>
+                    </div>"""
+                for k, v in clean_params.items()
+            ])
+            st.markdown(f"<div class='best-params-grid'>{param_items}</div>", unsafe_allow_html=True)
+
+            # CV results table
+            with st.expander("📋 Full cross-validation results"):
+                cv_df = pd.DataFrame(searcher.cv_results_)
+                display_cols = (
+                    ["mean_test_score", "std_test_score", "rank_test_score"]
+                    + [c for c in cv_df.columns if c.startswith("param_")]
+                )
+                display_cols = [c for c in display_cols if c in cv_df.columns]
+                cv_show = cv_df[display_cols].sort_values("rank_test_score").head(20)
+                cv_show.columns = [c.replace("param_model__", "").replace("mean_test_score", "CV Score")
+                                    .replace("std_test_score", "Std").replace("rank_test_score", "Rank")
+                                    for c in cv_show.columns]
+                st.dataframe(cv_show, use_container_width=True, hide_index=True)
+
+            # Before vs After scatter
+            st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+            samp_idx2 = np.random.default_rng(0).choice(
+                len(y_test_arr), size=min(500, len(y_test_arr)), replace=False
+            )
+            ba1, ba2 = st.columns(2, gap="large")
+
+            with ba1:
+                orig_pred = test_preds[tune_model]
+                fig_before = px.scatter(
+                    x=y_test_arr[samp_idx2], y=orig_pred[samp_idx2],
+                    labels={"x": "Actual (₹)", "y": "Predicted (₹)"},
+                    title=f"Before Tuning · {tune_model}",
+                    opacity=0.4, color_discrete_sequence=["#888888"],
+                )
+                mn2 = y_test_arr[samp_idx2].min(); mx2 = y_test_arr[samp_idx2].max()
+                fig_before.add_shape(type="line", x0=mn2, y0=mn2, x1=mx2, y1=mx2,
+                                     line=dict(color="red", dash="dot", width=2))
+                fig_before.update_layout(height=300, margin=dict(t=50,b=10,l=10,r=10),
+                                         paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                                         title_font=dict(size=13, color="#4A5568"),
+                                         xaxis=dict(gridcolor="#EEE6D8"), yaxis=dict(gridcolor="#EEE6D8"))
+                st.plotly_chart(fig_before, use_container_width=True)
+
+            with ba2:
+                fig_after = px.scatter(
+                    x=y_test_arr[samp_idx2], y=tuned_pred[samp_idx2],
+                    labels={"x": "Actual (₹)", "y": "Predicted (₹)"},
+                    title=f"After Tuning · {tune_model} ✨",
+                    opacity=0.4, color_discrete_sequence=["#3A7D44"],
+                )
+                fig_after.add_shape(type="line", x0=mn2, y0=mn2, x1=mx2, y1=mx2,
+                                    line=dict(color="red", dash="dot", width=2))
+                fig_after.update_layout(height=300, margin=dict(t=50,b=10,l=10,r=10),
+                                        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                                        title_font=dict(size=13, color="#4A5568"),
+                                        xaxis=dict(gridcolor="#EEE6D8"), yaxis=dict(gridcolor="#EEE6D8"))
+                st.plotly_chart(fig_after, use_container_width=True)
+
+            st.success(f"✅ Tuned **{tune_model}** is now active! Switch to 'Predict Price' to use it.")
+
+        except Exception as e:
+            progress_bar.empty()
+            st.error(f"❌ Tuning failed: {e}")
+
+    # ── Show previously tuned results if available ──
+    elif tune_model in st.session_state.tuned_metrics and not tune_btn:
+        tm = st.session_state.tuned_metrics[tune_model]
+        bp = st.session_state.best_params.get(tune_model, {})
+        orig = metrics[tune_model]
+
+        st.markdown("""
+        <div style='background:#E8F4EA;border:1px solid #6B9E6F;border-radius:12px;
+                    padding:14px 20px;margin-bottom:16px;font-size:.9rem;color:#2A5C32'>
+          ✨ This model has already been tuned. Results below. Adjust settings and re-run to tune again.
+        </div>
+        """, unsafe_allow_html=True)
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("MAE Before",       f"₹{orig['MAE']:,.0f}")
+        c2.metric("MAE After (Tuned)", f"₹{tm['MAE']:,.0f}",
+                  f"{orig['MAE']-tm['MAE']:+,.0f} ₹")
+        c3.metric("R² Before",        f"{orig['R2']:.4f}")
+        c4.metric("R² After (Tuned)", f"{tm['R2']:.4f}",
+                  f"{tm['R2']-orig['R2']:+.4f}")
+
+        if bp:
+            clean = {k.replace("model__", ""): v for k, v in bp.items()}
+            items = "".join([
+                f"<div class='best-param-item'><div class='best-param-name'>{k}</div>"
+                f"<div class='best-param-val'>{v}</div></div>"
+                for k, v in clean.items()
+            ])
+            st.markdown(f"<div style='font-size:.85rem;font-weight:700;color:#4A5568;"
+                        f"margin:16px 0 8px'>🎯 Best Parameters</div>"
+                        f"<div class='best-params-grid'>{items}</div>",
+                        unsafe_allow_html=True)
 
 
 # ═══════════════════════════════════════════════
